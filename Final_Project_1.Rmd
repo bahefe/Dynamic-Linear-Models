@@ -1,0 +1,772 @@
+---
+title: "Bocconi University, 20236 - Time Series Analysis - Final Project"
+author: "Efecan Bahcivanoglu, Ozan Ocal, Francesca Manca, Clementine Lauvergne"
+date: "02/06/2024"
+output: pdf_document
+---
+
+      
+```{r setup, echo=F, message=F, warning = F}
+knitr::opts_chunk$set(message = FALSE,
+                      results = FALSE,
+                      warning = FALSE,
+                      echo = FALSE,
+                      fig.align = "center")
+
+set.seed(2020)
+#libraries
+library(tseries)
+library(lubridate)
+library(imputeTS)
+library(cowplot)
+library(sf)  
+library(depmixS4)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(astsa) 
+library(forecast)
+library(sf)
+library(dlm)
+library(geosphere)
+library(ggmap)
+library(patchwork)
+library(grid)
+library(gtable)
+library(xtable)
+library(ggrepel)
+library(ggplot2)
+library(knitr)
+library(scales)
+library(patchwork)
+library(zoo)
+library(mvtsplot)
+library(geodist)
+library(kableExtra)
+library(xtable)
+library(gridExtra)
+library(tidyverse)
+library(reshape2)
+theme_set(theme_minimal())
+
+setwd("/Users/Efecan/Desktop/Time Series For Financial Data")
+```
+
+### Introduction
+
+The issue of human-induced environmental impacts has gained significant attention over recent decades, particularly concerning air pollution—its causes and the role of data in informing policy decisions. High concentrations of airborne particles like PM2.5 have been consistently linked to various adverse health effects, including severe cases of Covid-19 and other respiratory ailments. High-quality data and robust statistical models are crucial for governments and policymakers, enabling them to understand and predict air pollution trends. We have access to data from the EPA regarding hourly air quality in California during the summer of 2020. We'll use various statistical models to analyze PM2.5 concentration such as Hidden Markov Models, Univariate and Multivariate Dynamic Linear Models.
+
+### Data Summary
+
+```{r,echo=FALSE,fig.align='center',fig.height=4.5,fig.width=15, fig.cap="Station 41: Box Plot of Wind and Temp with Plot of PM2.5",warning=FALSE}
+dat <- read_csv("ts_epa_2020_west_sept_fill.csv", col_types = cols(temp = col_double(), wind = col_double()))
+locations <- data.frame("Longitude" = unique(dat$Longitude), "Latitude" = unique(dat$Latitude), labels = 1:10)
+Stations <- st_as_sf(locations, coords = c("Longitude", "Latitude"),crs = 4326)
+
+station_41 <- dat %>% dplyr::filter(station_id == 41)
+station_41$datetime <- as.POSIXct(station_41$datetime)
+
+station_41_long <- station_41 %>%
+  gather(key = "variable", value = "value", pm25, temp, wind)
+
+# Calculate summary statistics for each variable
+summary_stats <- station_41_long %>%
+  group_by(variable) %>%
+  summarise(
+    Mean = mean(value, na.rm = TRUE),
+    Q1 = quantile(value, 0.25, na.rm = TRUE),
+    Median = median(value, na.rm = TRUE),
+    Q3 = quantile(value, 0.75, na.rm = TRUE)
+  )
+station_41_long <- station_41 %>%
+  gather(key = "variable", value = "value", pm25, temp, wind)
+
+
+graph1 <- ggplot(subset(station_41_long, variable == "temp"), aes(x = variable, y = value, fill = variable)) +
+  geom_boxplot() +
+  labs(title = "Temperature", x = NULL, y = "Temperature (°C)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+graph2 <- ggplot(subset(station_41_long, variable == "wind"), aes(x = variable, y = value, fill = variable)) +
+  geom_boxplot() +
+  labs(title = "Wind Speed", x = NULL, y = "Wind (m/s)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+
+
+#Graph of station 41 observations
+graph3 <-station_41 %>% 
+  ggplot() +
+  geom_rect(data=data.frame(xmin=min(station_41$datetime), xmax=max(station_41$datetime), ymin=25, ymax=300),
+            aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax), fill="darkred", alpha=.2) +
+  annotate(geom="text", x=as.POSIXct("2020-06-25 23:00:00 UTC"), y=28, label=as.character(expression("Dangerous PM"[2.5]*" level")), parse=TRUE, color="darkred") +
+  geom_line(data=station_41, aes(x=datetime, y=pm25)) + 
+  geom_hline(yintercept=25, color="darkred") + 
+  scale_x_datetime(expand=c(0,0)) + ylab(expression(PM[2.5])) +
+  scale_y_continuous(limits=c(0, 300), expand=c(0,0)) +
+  labs(x=NULL)+theme(axis.title=element_text(size=20),axis.text=element_text(size=15))+theme_bw()+ ggtitle("")
+
+
+
+ 
+
+
+grid.arrange(graph1,graph2, graph3, ncol=3)
+
+```
+First we look at the boxplots of complementary time serieses of temperature and wind speed. Existence of outliers in wind speed compared to temperature suggests while temperature follows a structured behavior throughout the summer wind speed fluctuates and thus possibly effects the PM2.5 levels. When we look at the PM2.5 levels we can observe a mildly stationary with low variance till the middle of August; however, after August as the volatility increases mean increases too. this behavior can be explained by the West Coast wildfire period, which worsens PM2.5 levels.
+
+We furthermore analyze the cross-correlation and the covariance between wind speed, temperature and pM2.5 levels. For the wind, a negative cross-correlation value (-0.05483028) indicates an inverse relationship between wind speed and PM2.5 levels. This occurs at lag 0 and it is consistent with the understanding that increased wind can help disperse air pollutants, thereby reducing PM2.5 concentrations. For the temperature, there is a positive cross-correlation value (0.06909771) occuring at 20 hours prior. Last but not least, the magnitude of the cross-correlations suggest while there's a detectable linear relationship it's indeed quite weak.
+```{r, echo = FALSE}
+
+adf_pm25 <- adf.test(station_41$pm25, alternative = "stationary")
+adf_temp <- adf.test(station_41$temp, alternative = "stationary")
+adf_wind <- adf.test(station_41$wind, alternative = "stationary")
+
+cor_matrix <- cor(station_41[,c("pm25", "temp", "wind")], use = "complete.obs")
+
+cc_wind_pm25 <- ccf(station_41$wind, station_41$pm25, lag.max = 20, plot = FALSE)
+cc_values_wind <- cc_wind_pm25$acf[cc_wind_pm25$lag <= 0]
+lags_wind <- cc_wind_pm25$lag[cc_wind_pm25$lag <= 0]
+max_index_wind <- which.max(cc_values_wind)
+max_cc_value_wind <- cc_values_wind[max_index_wind]
+max_lag_wind <- lags_wind[max_index_wind]
+
+
+cc_temp_pm25 <- ccf(station_41$temp, station_41$pm25, lag.max = 20, plot = FALSE)
+cc_values_temp <- cc_temp_pm25$acf[cc_temp_pm25$lag <= 0]
+lags_temp <- cc_temp_pm25$lag[cc_temp_pm25$lag <= 0]
+max_index_temp <- which.max(cc_values_temp)
+max_cc_value_temp <- cc_values_temp[max_index_temp]
+max_lag_temp <- lags_temp[max_index_temp]
+
+# Print the results for wind
+cat("The absolute maximum cross-correlation value for the wind is:", max_cc_value_wind, 
+    "and this occurs at lag:", max_lag_wind, "\n")
+
+# Print the results for temperature
+cat("The absolute maximum cross-correlation value for the temp is:", max_cc_value_temp, 
+    "and this occurs at lag:", max_lag_temp, "\n")
+
+```
+
+
+### Hidden Markov Model
+
+To analyze our data, we opted to employ a Hidden Markov Model (HMM) to delineate the various pollution levels and their instability through the estimated states. A pivotal decision in effectively modeling the data with an HMM involved selecting the appropriate number of states to refine the model. The bulk of the data typically oscillates around a relatively low mean with modest variance. Notably, from the end of August onward, the data transitions to a phase where observations become more volatile, clustering around a higher mean value. The consideration of adding a third, intermediate state seemed justified by the observable fluctuations between June and August, helping to better accommodate the significant spikes seen in September. Faced with uncertainties about the optimal number of states, we chose to adopt an empirical approach. We fitted two models with varying numbers of states and compared their outputs to determine the most suitable configuration. The model configuration is presented as follows.
+
+\medskip
+$$Y_{t}|S_{t} \overset{ind}\sim N(\mu_{i}, \sigma^2_{i}) $$
+
+$$\textrm{where latent states }  \{S_{t}\} \textrm{ evolves according to a Markov Chain.}$$
+
+We analyze the data with 2 states: (high, low) and then 3 states: (high, medium, low).
+
+```{r,message=FALSE, results = 'hide'}
+y <- as.numeric(station_41$pm25)
+hmm_2 <- depmix(y ~ 1, data = data.frame(y), nstates = 2) 
+hmm_2_fitted <- fit(hmm_2)
+```
+
+```{r,table-output, results='asis', message=FALSE}
+
+trans_matrix = matrix(getpars(hmm_2_fitted)[3:6], ncol = 2, byrow = TRUE, 
+                      dimnames = list(c("High", "Low"),
+                                      c("High", "Low")))
+
+MLE_se <- standardError(hmm_2_fitted)
+MLE_se$n <- as.numeric(rownames(MLE_se))
+
+conf_int <- confint(hmm_2_fitted)
+conf_int$n <- as.numeric(rownames(MLE_se))
+
+
+MLE_table <- MLE_se %>% left_join(conf_int)
+
+MLE_table <- data.frame(subset(MLE_table, n >= 7, select = -c(constr, n)))
+rownames(MLE_table) <- c("High($\\mu_1$)", "High($\\sigma_1$)",
+                          "Low($\\mu_2$)", "Low($\\sigma_2$)")
+colnames(MLE_table) <- c("Value", "SE", "2.5\\%", "97.5\\%")
+
+
+kable(trans_matrix, caption = "HMM 2 States: Transition Matrix") 
+kable(MLE_table, caption = "HMM 2 States: MLE of Mean and S.D.")
+
+```
+When we look at the estimated transition matrix probabilities, it's evident that markov chain is persistent in the sense that once state X is entered there's a high probability that it will stay in that state. Furthermore if we compare the values for transitioning from High to Low to transitioning from Low to High we see that it's almost 5 times more likely to transition from High to Low than vice versa. On the other hand if we analyze the MLE of the mean and standard deviation for Low and High states we can see that the mean value for High is 63.59 with 43.02 standard deviation, indicating higher volatility. Our model converged at iteration 10 with negative log-likelihood value of -10052.41. Next, we'll analyze the results of HMM with 3 states and we'll make a comparison with the 2 states.
+
+```{r,message=FALSE, results = 'hide'}
+hmm_3 <- depmix(y ~ 1, data = data.frame(y), nstates = 3, verbose=FALSE)
+set.seed(5)
+hmm_3_fitted <- fit(hmm_3)
+```
+
+```{r, table-output-3-states, results='asis', message=FALSE}
+
+
+trans_prob_3 <- matrix(getpars(hmm_3_fitted)[4:12],ncol=3,byrow=TRUE)
+colnames(trans_prob_3) <-  c("High", "Medium", "Low")
+rownames(trans_prob_3) <- c("High", "Medium", "Low")
+
+#Standard errors
+MLE_se_3=standardError(hmm_3_fitted)
+MLE_se_3$n = as.numeric(rownames(MLE_se_3))
+
+#Confidence interval
+conf_int_3 = confint(hmm_3_fitted)
+conf_int_3$n = as.numeric(rownames(MLE_se_3))
+
+#Table with both standard errors and confidence intervals
+MLE_table_3 = MLE_se_3 %>% left_join(conf_int_3)
+
+
+
+Parameters_3 <- data.frame(subset(MLE_table_3,n>=13, select = -c(constr,n)))
+#High-Medium-Low formatting
+Parameters_3_final <- Parameters_3
+Parameters_3_final[3,] <- Parameters_3[5,]
+Parameters_3_final[5,] <- Parameters_3[3,]
+Parameters_3_final[4,] <- Parameters_3[6,]
+Parameters_3_final[6,] <- Parameters_3[4,]
+
+
+rownames(Parameters_3_final)=c("Low State ($\\mu_3$)", "Low State ($\\sigma_3$)", "Medium State ($\\mu_2$)", "Medium State ($\\sigma_2$)", "High State  ($\\mu_1$)","High State ($\\sigma_1$)" )
+colnames(Parameters_3_final)=c("par","se","2.5\\%","97.5\\%")
+
+kable(trans_prob_3, caption = "HMM 3 States: Transition Matrix") 
+kable(Parameters_3_final, caption = "HMM 3 States: MLE of Mean and S.D.")
+```
+Again we can see that same persistent behaviour regarding staying in state X once it's reached. It's interesting to see that transition from High to Medium has 0 probability indication while increase the pm25 levels is gradual the decline is sudden. Our model converged at iteration 43 with negative log-likelihood value of -9490. While this log-likelihood value is better than the HMM with 2 states, one must know that as we increase the number of states model will have greater negative log-likelihood value but that doesn't necesarrily implies a better model.
+
+
+### HMM(2) States Decoding  
+
+
+```{r,warning=FALSE,echo=FALSE}
+estimated_states <- posterior(hmm_2_fitted)
+
+estimated_mean1=hmm_2_fitted@response[[1]][[1]]@parameters$coefficients 
+estimated_mean2=hmm_2_fitted@response[[2]][[1]]@parameters$coefficients 
+estimated_means=rep(estimated_mean1, length(station_41$pm25)) 
+estimated_means[estimated_states[,1]==2]=estimated_mean2
+
+sigma1=MLE_table[2,1]
+sigma2=MLE_table[4,1]
+
+estimated_sigma=rep(sigma1, length(station_41$pm25)) 
+estimated_sigma[estimated_states[,1]==2]=sigma2
+
+
+estimated_means_combined<- data.frame(datetime=station_41$datetime,pm25=station_41$pm25,estimated_means,estimated_sigma,state=estimated_states[,1])
+```
+
+
+```{r,echo=FALSE,fig.height=6,fig.width=17, fig.cap="${PM}_{2.5}$ Levels and State Values HMM 2 States",warning=FALSE,message=FALSE}
+scale_dec1 <- function(x) sprintf("%.0f", x) 
+
+get_legend <- function(myggplot){
+  tmp <- ggplot_gtable(ggplot_build(myggplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)
+}
+
+obs_plot_states <- ggplot(estimated_means_combined, aes(x=datetime)) +
+  geom_line(aes(y = pm25, colour="pm2.5")) + 
+  geom_point(aes(y = estimated_means, colour="HMM estimated mean"), shape = 16, size=0.8) +
+  geom_ribbon(data=estimated_means_combined,aes(ymin=estimated_means - estimated_sigma,ymax= estimated_means + estimated_sigma, fill ="std deviation"),alpha=0.4) +
+  annotate(geom="text", x=as.POSIXct("2020-06-23 23:00:00 UTC"), y=28, size = 6, label=as.character(expression("Dangerous PM"[2.5]*" level")), parse=TRUE, color="darkred") +
+  scale_colour_manual(breaks = c("pm2.5", "HMM estimated mean"),values = c("black", "blue"),labels=c("pm2.5",expression(hat(mu))))+scale_fill_manual(breaks="std deviation",values="grey60",labels = expression(hat(sigma)))+ scale_y_continuous(labels=scale_dec1) + xlab("") + ylab(expression(PM[2.5]))+
+  geom_hline(yintercept=25, color="darkred") + 
+  scale_x_datetime(expand=c(0,0)) +
+  labs(x=NULL) + theme(legend.position="bottom",axis.title=element_text(size=20),axis.text=element_text(size=15), legend.title = element_blank(), legend.text = element_text(size = 13), legend.direction = "horizontal") + labs(colour = "")+labs(fill="")+theme_bw()
+
+
+print(obs_plot_states)
+```
+
+\newpage
+
+### Dynamic Linear Model
+Before feeding our data to a DLM we transformed it by applying log transformation. Then we tried different coarcer sclaes from 6 hours to 12 hours.It was quite intuitive that we can't use a scale that doesn't divide the 24 hours as each measuremnt then would be taken through different times over the day(10hours: 10am-8pm-4am-2pm and so on). Between 4,6,8 and 12 hours we have calculate the sample variance. As with the PCA we want to use the scale that has the greates variance as it contains information. Though, coarcer scales resulted in a higher variance so we choose the optimal scale based on the trade-off which was the 8 hours.
+
+\begin{itemize}
+  \item Sample variance for 4-hour intervals: 0.3547907
+  \item Sample variance for 6-hour intervals: 0.3473822
+  \item Sample variance for 8-hour intervals: 0.3421984
+  \item Sample variance for 12-hour intervals: 0.3335311
+\end{itemize}
+
+\bigskip
+
+Our model is random walk plus noise:
+
+
+
+$$
+\begin{cases}
+\begin{aligned}
+Y_t &=  \theta_t + v_t, \quad & v_t  \overset{iid}\sim N(0, \sigma_v^2) \\
+\theta_t &=  \theta_{t-1} + w_t, \quad & w_t \overset{iid}\sim N(0,\sigma_w^2 ) 
+\end{aligned}
+\end{cases}
+$$
+
+
+
+```{r, echo = FALSE}
+dat <- read_csv("ts_epa_2020_west_sept_fill.csv", col_types = cols(temp = col_double(), wind = col_double()))
+locations <- data.frame("Longitude" = unique(dat$Longitude), "Latitude" = unique(dat$Latitude), labels = 1:10)
+Stations <- st_as_sf(locations, coords = c("Longitude", "Latitude"),crs = 4326)
+
+
+# Filter for the specific stations
+stations <- c(41)
+station_data <- dplyr::filter(dat, station_id %in% stations)
+
+pivoted_data <- station_data %>%
+  tidyr::pivot_wider(
+    id_cols = datetime,  # Ensure datetime is used to align the data
+    names_from = station_id,
+    values_from = pm25,
+    names_prefix = "pm25_",
+    values_fill = list(pm25 = NA)  # Fill missing data with NA
+  )
+
+columns_to_transform <- c("pm25_41")
+
+
+pivoted_data[columns_to_transform] <- lapply(pivoted_data[columns_to_transform], log)
+
+##### Choosing which hourly average to go with #######
+
+data_4h <- pivoted_data %>%
+  mutate(time_block = as.POSIXct((as.integer(datetime) %/% 14400) * 14400, origin = "1970-01-01", tz = "UTC")) %>%
+  group_by(time_block) %>%
+  summarize(across(starts_with("pm25_"), ~ mean(.x, na.rm = TRUE)))
+data_6h <- pivoted_data %>%
+  mutate(time_block = as.POSIXct((as.integer(datetime) %/% 21600) * 21600, origin = "1970-01-01", tz = "UTC")) %>%
+  group_by(time_block) %>%
+  summarize(across(starts_with("pm25_"), ~ mean(.x, na.rm = TRUE)))
+data_8h <- pivoted_data %>%
+  mutate(time_block = as.POSIXct((as.integer(datetime) %/% 28800) * 28800, origin = "1970-01-01", tz = "UTC")) %>%
+  group_by(time_block) %>%
+  summarize(across(starts_with("pm25_"), ~ mean(.x, na.rm = TRUE)))
+data_12h <- pivoted_data %>%
+  mutate(time_block = as.POSIXct((as.integer(datetime) %/% 43200) * 43200, origin = "1970-01-01", tz = "UTC")) %>%
+  group_by(time_block) %>%
+  summarize(across(starts_with("pm25_"), ~ mean(.x, na.rm = TRUE)))
+
+
+sample_var_4h <- var(data_4h$pm25_41, na.rm = TRUE)
+sample_var_6h <- var(data_6h$pm25_41, na.rm = TRUE)
+sample_var_8h <- var(data_8h$pm25_41, na.rm = TRUE)
+sample_var_12h <- var(data_12h$pm25_41, na.rm = TRUE)
+
+cat("Sample variance for 4-hour intervals:", sample_var_4h, "\n")
+cat("Sample variance for 6-hour intervals:", sample_var_6h, "\n")
+cat("Sample variance for 8-hour intervals:", sample_var_8h, "\n")
+cat("Sample variance for 12-hour intervals:", sample_var_12h, "\n")
+
+```
+
+
+
+
+
+```{r, table-output-4-states, results='asis'}
+buildrw <- function(param){dlmModPoly(order=1, dV=param[1], 
+                                      dW=param[2], m0=2.75, C0=0.25)}
+
+outMLE <- dlmMLE(data_8h$pm25_41, parm = rep(100, 2), buildrw, lower=c(0.00001, 0), hessian = TRUE)
+
+
+hessian_inv <- solve(outMLE$hessian)
+se <- sqrt(diag(hessian_inv))
+MLE_data=data.frame(outMLE$par, se)
+# table for SE and ML estimates
+colnames(MLE_data) <- c("Parameter Estimate", "SE")
+rownames(MLE_data) <- c("$\\sigma_v^2$", "$\\sigma_w^2$")
+kable(MLE_data, caption = "MLE and SE of DLM")
+
+```
+
+\bigskip
+
+```{r,out.width="80%",out.height="70%",results='asis', fig.cap="One-step Forecasts for Station 41" ,fig.align="center",echo=FALSE, message=FALSE, warning=FALSE}
+
+#Model building 
+st41_model <- buildrw(outMLE$par)
+filter_results = dlmFilter(data_8h$pm25_41, st41_model)
+
+
+C <- dlmSvd2var(filter_results$U.C, filter_results$D.C) 
+sqrtC=sqrt(unlist(C)) 
+R <- dlmSvd2var(filter_results$U.R, filter_results$D.R) 
+Q <- lapply(R, function(x) x + outMLE$par[1])
+sqrtQ=sqrt(unlist(Q)) 
+forecasts = filter_results$f
+
+
+f_lower =forecasts + qnorm(0.025)*sqrtQ 
+f_upper =forecasts + qnorm(0.975)*sqrtQ 
+
+
+dlm_41=data.frame(data_8h$time_block, data_8h$pm25_41, forecasts, f_lower, f_upper)
+
+scale_dec <- function(x) sprintf("%.1f", x)
+
+plot_pm25_forecasts <- ggplot(data_8h, aes(x = time_block, y = pm25_41)) + 
+  geom_line(aes(y = data_8h$pm25_41, colour = "Scaled PM2.5"), size = 0.4) + 
+  geom_line(aes(y = forecasts, colour = "One-step ahead forecast"), size = 0.45) +
+  scale_colour_manual("", values = c("black", "blue"), breaks = c("Scaled PM2.5", "One-step ahead forecast")) +
+  geom_ribbon(aes(ymin = f_lower, ymax = f_upper, fill = "95% Confidence Interval"), alpha = 0.45) +
+  scale_fill_manual("", values = "grey60", breaks = "95% Confidence Interval") + 
+  xlab("") + 
+  ylab(expression(PM[2.5])) + 
+  scale_y_continuous(labels = scale_dec) + 
+  ylim(2, 4.4) + 
+  theme(legend.text = element_text(size = 12),axis.title = element_text(size = 16),legend.position = "bottom", panel.border = element_rect(color = "black", fill = NA, size = 0.17)) +
+  geom_hline(yintercept = log(25), color = "darkred", size = 0.27) +
+  annotate(geom = "text", x = as.POSIXct("2020-06-29"), y = log(25) + 0.1, 
+           label = expression("Dangerous PM"[2.5]*" level"), size = 4, color = "darkred") +
+  guides(colour = guide_legend(nrow = 2, byrow = TRUE), fill = guide_legend(nrow = 2, byrow = TRUE)) +
+  scale_x_datetime(expand = c(0, 0))
+
+print(plot_pm25_forecasts)
+
+#sum(is.na(data_8h$pm25_41))
+#sum(is.na(forecasts))
+#sum(is.na(f_lower))
+#sum(is.na(f_upper))
+
+# Check data lengths
+#length(data_8h$time_block)
+#length(forecasts)
+#length(f_lower)
+#length(f_upper)
+
+#They are all full, no reason for the graph discontinuity? 
+```
+
+```{r, echo = FALSE, fig.cap="Diagnostic Plots for Station 41: Univariate DLM", fig.height=4.7,fig.width=10}
+# Assuming 'filter_results' and 'onestep_predictions' are already defined
+onestep_predictions <- window(filter_results$f,start=start(data_8h$pm25_41)[1])
+residuals <- filter_results$y - onestep_predictions
+
+
+par(mfrow=c(3, 2))
+plot(residuals, type = "l", main = "Residuals")
+acf(residuals, main = "ACF of Residuals")
+pacf(residuals, main = "PACF of Residuals")
+hist(residuals, breaks = "Sturges", freq = FALSE, main = "Histogram of Residuals")
+lines(density(residuals), col = "blue")
+
+# QQ plot for residuals
+qqnorm(residuals, main = "QQ Plot of Residuals")
+qqline(residuals, col = "red")  # Adds a reference line to the plot
+
+# Perform a statistical test for normality
+shapiro.test(residuals)
+
+```
+The residuals do not display obvious patterns or trends, which generally suggests that the model does not suffer from non-random error structures.However, the variability of residuals appears slightly inconsistent, hinting at potential heteroscedasticity.This is consistent with the peaked levels of PM2.5 during the high state in the HMM model. ACF and PACF plots suggests there's not significant autocorrelation of the residuals.
+
+###  Spatial Dynamic Linear Model
+We created a spatial dlm with using measurements from four statins.
+$$
+\begin{cases}
+\begin{aligned}
+Y_t &= F \theta_t + v_t, \quad & v_t  \overset{indep}\sim N(\textbf{0}, V) \\
+\theta_t &= G \theta_t + w_t, \quad & w_t \overset{indep}\sim N(\textbf{0}, W) 
+\end{aligned}
+\end{cases}
+$$
+$Y_t=(Y_{t,41},Y_{t,47},Y_{t,96},Y_{t,99})'$ is the vector of PM2.5 data from four stations.
+The $F$ and $G$ matrices are 4x4 identity matrices. The $V$ matrix is also 4x4 diagonal matrix where diagonal terms are the measurement errors belonging to corresponding stations. Spatial dependence is not assumed for the measurement error but state errors are spatially dependent and defined by the  $W[j,i]=Cov(w_{j,t},w_{i,t})=\sigma^2_w exp(-\phi D[j,i])$. Where matrix D corresponds to the distance between the stations and $\phi$ is the decay parameters. In total we have 6 parameters to estimate, the diagonal terms of the $V$ matrix, $\sigma^2_w$ and the $\phi$. For the distance matrix we also include the elevation and then take the euclidean distance in 3 dimension.
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+dat <- read_csv("ts_epa_2020_west_sept_fill.csv", col_types = cols(temp = col_double(), wind = col_double()))
+locations <- data.frame("Longitude" = unique(dat$Longitude), "Latitude" = unique(dat$Latitude), labels = 1:10)
+Stations <- st_as_sf(locations, coords = c("Longitude", "Latitude"),crs = 4326)
+
+
+# Filter for the specific stations
+stations <- c(41, 47, 96, 99)
+station_data <- dplyr::filter(dat, station_id %in% stations)
+
+pivoted_data <- station_data %>%
+  tidyr::pivot_wider(
+    id_cols = datetime,  # Ensure datetime is used to align the data
+    names_from = station_id,
+    values_from = pm25,
+    names_prefix = "pm25_",
+    values_fill = list(pm25 = NA)  # Fill missing data with NA
+  )
+
+columns_to_transform <- c("pm25_41", "pm25_47", "pm25_96", "pm25_99")
+
+
+pivoted_data[columns_to_transform] <- lapply(pivoted_data[columns_to_transform], log)
+
+
+data_8h <- pivoted_data %>%
+  mutate(time_block = as.POSIXct((as.integer(datetime) %/% 28800) * 28800, origin = "1970-01-01", tz = "UTC")) %>%
+  group_by(time_block) %>%
+  summarize(across(starts_with("pm25_"), ~ mean(.x, na.rm = TRUE)))
+# Get coordinates for distance calculation
+coordinates <- station_data %>%
+  select(station_id, Longitude, Latitude) %>%
+  distinct()
+
+#We also add elevation and calculate the euclidean distance in 3D. Even though the distance in the third dimension
+#is not significant compared to others, we still belive it's important to include.
+coordinates <- coordinates %>%
+  mutate(Elevation = c(10.0, 32.0, 930.5, 710.0))
+
+
+calculate_3D_distance <- function(station1, station2) {
+  # Ensure inputs are numeric vectors
+  surface_distance <- distHaversine(
+    c(as.numeric(station1["Longitude"]), as.numeric(station1["Latitude"])), 
+    c(as.numeric(station2["Longitude"]), as.numeric(station2["Latitude"]))
+  )
+  elevation_difference <- abs(as.numeric(station1["Elevation"]) - as.numeric(station2["Elevation"]))
+  sqrt(surface_distance^2 + elevation_difference^2)
+}
+
+# Calculate distances between all pairs of stations
+distance_matrix <- outer(1:nrow(coordinates), 1:nrow(coordinates), Vectorize(function(i, j) {
+  if (i == j) {
+    0  # Distance to itself is zero
+  } else {
+    calculate_3D_distance(coordinates[i, ], coordinates[j, ])
+  }
+}))
+
+
+dist_matrix <- matrix(unlist(distance_matrix), nrow = length(stations), byrow = TRUE)
+dist_matrix <- dist_matrix / 1000
+#dist_matrix <- log(dist_matrix)
+#Rather than just leaving the dist_matrix in km with high values we scale them using the log transformation
+#thus enabling the decay parameters to adjust accordingly.Other approached have been tried too.
+
+##Scale distances to be between 0 and 1 if needed.
+#min_val <- min(dist_matrix[dist_matrix > 0])
+#max_val <- max(dist_matrix)
+#scaled_dist_matrix <- (dist_matrix - min_val) / (max_val - min_val)
+
+series_data <- as.matrix(data_8h[columns_to_transform])
+pm25_41 = ts(series_data[,1])
+pm25_47 = ts(series_data[,2])
+pm25_96 = ts(series_data[,3])
+pm25_99 = ts(series_data[,4])
+Y = ts.union(pm25_41, pm25_47, pm25_96, pm25_99)
+rm(list= c("pm25_41","pm25_47", "pm25_99", "pm25_96"))
+```
+
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+
+
+build <- function(params) {
+dlmMod <- dlmModPoly(1)
+  dlmMod$FF=diag(4)
+  dlmMod$GG=diag(4)
+  dlmMod$V<- diag(params[1:4])
+  dlmMod$W=params[5] * exp(-params[6] * dist_matrix)
+  dlmMod$m0=Y[1,] 
+  dlmMod$C0=diag(4) * 100
+  return(dlmMod)
+}
+
+MLE1 <- dlmMLE(Y, parm = c(0.01,0.01,0.01,0.01,0.01,0.01), build, hessian=T, method = "L-BFGS-B", lower=rep(0.0001,6))
+MLE2 <- dlmMLE(Y, parm = c(0.1,0.1,0.1, 0.1,0.1,0.1), build, hessian=T, method = "L-BFGS-B", lower=rep(0.0001,6))
+MLE3 <- dlmMLE(Y, parm = c(0.01,0.01,0.01,0.01,0.01,0.01), build, method="SANN", lower=rep(0.0001,6), hessian=T)
+MLE4 <- dlmMLE(Y, parm = c(0.1,0.1,0.1,0.1,0.1,0.1), build, method="SANN", lower=rep(0.0001,6), hessian=T)
+
+
+
+#MLE1$value
+#MLE2$value
+#MLE3$value
+#MLE4$value
+
+
+
+#MLE1 has the best values so we go with that.
+
+parameters = MLE2$par
+#MLE2$value
+#MLE2$counts
+#MLE2$convergence
+
+
+V_estimated <- diag(parameters[1:4])
+
+W_estimated <- parameters[5] * exp(-parameters[6] * dist_matrix)
+Phi_estimated <- parameters[6]
+
+hessian_inv <- solve(MLE3$hessian)
+se <- sqrt(diag(hessian_inv))
+cat("Standard errors of the variances:", se, "\n")
+dlm_all <-build(MLE3$par)
+
+```
+To estimate the unknown parameters we use Maximum Likelihood Estimation where maxima is reached via numerical optimization algorithms. One must take it into consideration that the likelihood function for a DLM may present many local maxima. This implies that starting the optimization routine from different starting points may lead to different maxima. It is therefore a good idea to start the optimizer several times from different starting values and compare the corresponding maxima. This is exactly what we did. Furthermore we use two different methods: Simulated Annealing and  L-BFGS-B to explore the MLE space.
+
+## Simulated Annealing (SANN)
+
+1. **Initialization**: Start with an initial solution \( s_0 \) and an initial temperature \( T_0 \).
+
+2. **Iteration**:
+    - For each iteration, a new solution \( s' \) is generated by making a small random change to the current solution \( s \).
+    - The change in the cost function \( \Delta E = f(s') - f(s) \) is calculated.
+    - If \( \Delta E < 0 \), the new solution \( s' \) is accepted.
+    - If \( \Delta E \geq 0 \), the new solution \( s' \) may still be accepted with a probability \( e^{-\Delta E / T} \), where \( T \) is the current temperature.
+
+3. **Cooling**: Reduce the temperature according to a cooling schedule, typically \( T = \alpha T \), where \( 0 < \alpha < 1 \).
+
+4. **Termination**: The algorithm terminates when the temperature is sufficiently low or after a fixed number of iterations.
+
+
+## L-BFGS-B
+
+L-BFGS-B is an optimization algorithm in the family of quasi-Newton methods. It is specifically designed to handle bound constraints and to approximate the Broyden–Fletcher–Goldfarb–Shanno (BFGS) algorithm, which uses an approximation to the Hessian matrix to steer its search for the optimum.
+
+The algorithm updates an approximation \( H_k \) of the inverse Hessian matrix using the following update rule, which is derived using only first derivatives:
+
+$$
+H_{k+1} = \left( I - \frac{s_k y_k^\top}{y_k^\top s_k} \right) H_k \left( I - \frac{y_k s_k^\top}{y_k^\top s_k} \right) + \frac{s_k s_k^\top}{y_k^\top s_k}
+$$
+
+where \( s_k = x_{k+1} - x_k \) and \( y_k = \nabla f(x_{k+1}) - \nabla f(x_k) \).
+
+Best negative log-likelihood value, -1956.076, is achieved by the L-BFGS-B algorithm with initial values (0.1,0.1,0.1, 0.1,0.1,0.1). Algorithm converges in 56 iterations.
+The estimated values of $\phi$ = 0.0025765 while $V$ and $W$ are the following:
+$$V = \begin{bmatrix}0.016363&0&0&0\\0&0.022290&0&0\\0&0&0.0010679&0\\0&0&0&0.0030771\end{bmatrix}  \quad W=\begin{bmatrix} 0.0232291&0.0204365&0.0055460&0.0054855\\0.0204365&0.0232291&0.0062164&0.0061396\\0.0055460&0.0062164&0.0232291&0.0224207\\0.0054855&0.0061396&0.0224207&0.0232291\end{bmatrix}$$
+
+If we compare our results with the univariate DLM for station 41 we can see that V has a lower value in the multivariate case (0.020342 in univariate). This is reasonable as we have a greater information sigma algebra established by introduction of the spatial dimension. Moreover, the measurement error variance for the station 96 and 99 are significanly less than station 41 and 47. More research can be done on if there's a difference on how each individual station collects data.
+```{r,echo=FALSE, message=FALSE, warning=FALSE, fig.cap="One-step Ahead Forecasts for 4-Stations"}
+
+#extracting the filtering and smoothing data
+filtered_results = dlmFilter(Y, dlm_all)
+
+
+#state prediction
+a_t <- filtered_results$a
+R_t <- dlmSvd2var(filtered_results$U.R, filtered_results$D.R)
+
+R_t_41 <- c()
+for(i in 1:366){
+  R_t_41[i]=R_t[i][[1]][1,1]
+}
+R_t_47 <- c()
+for(i in 1:366){
+  R_t_47[i]=R_t[i][[1]][2,2]
+}
+R_t_95 <- c()
+for(i in 1:366){
+  R_t_95[i]=R_t[i][[1]][3,3]
+}
+R_t_97 <- c()
+for(i in 1:366){
+  R_t_97[i]=R_t[i][[1]][4,4]
+}
+
+f_t <- filtered_results$f
+#Q_t = F_t R_t F'_t + V_t, and in our case, F_t is the identity matrix, so Q_t = R_t + V_t
+V_t <- diag(outMLE$par[1:4], nrow = 4, ncol = 4)
+
+Q_t<-R_t
+for (i in 1:366){
+  Q_t[i][[1]]<- R_t[i][[1]] + V_t
+}
+
+Q_t_41 <- c()
+for(i in 1:366){
+  Q_t_41[i]=Q_t[i][[1]][1,1]
+}
+Q_t_47 <- c()
+for(i in 1:366){
+  Q_t_47[i]=Q_t[i][[1]][2,2]
+}
+Q_t_95 <- c()
+for(i in 1:366){
+  Q_t_95[i]=Q_t[i][[1]][3,3]
+}
+Q_t_97 <- c()
+for(i in 1:366){
+  Q_t_97[i]=Q_t[i][[1]][4,4]
+}
+
+obs_plot <- function(i){
+  colors <- c("red", "blue", "green", "yellow") 
+  plot_color <- colors[i] 
+
+  ggplot() + 
+  ggtitle(paste("Observation Forecasts - Station",stations[i])) +
+  geom_ribbon(aes(x=lag(data_8h$time_block), ymin=f_t[,i]-1.96*sqrt(Q_t_41), ymax=f_t[,i]+1.96*sqrt(Q_t_41), fill='95% Credible Interval'), alpha=0.7) +
+  geom_line(aes(x=lag(data_8h$time_block), y=f_t[,i], col='Observation Forecast'),) +
+  geom_line(aes(x=data_8h$time_block, y=Y[,i], col='Observed'), alpha=0.5) +
+  scale_x_datetime(expand=c(0,0)) +
+  ylim(1.8, 5.2) +
+  labs(x=NULL, y=NULL) +
+  scale_color_manual(values=c("Observed"="black", "Observation Forecast"=colors[i]), 
+                     name="",
+                     labels=c("Observation Forecast", "Observed")) +
+  scale_fill_manual(values="darkgray", 
+                    name="",
+                    labels="95% Credible Interval")+theme_minimal()+
+  theme(
+     legend.position="none",
+     plot.title=element_text(size=8,hjust=0.5)
+     ) 
+}
+
+grid.arrange(newpage=F, obs_plot(1), obs_plot(2), obs_plot(3),obs_plot(4),nrow=2,ncol=2)
+
+```
+
+In Figure 5, we have the one-step-ahead observation forecasts based on the previously estimated parameters. The colored line is the forecasted value ($\mathrm{E}[\theta_t|y_{1:t-1}]$), while the black line represents the actual observed value. The grey colored area is the 95% confidence interval. Forecast values are quite similar to the actual values implying this model can be useful for policy makers.
+
+```{r, fig.cap="Diagnostic Plots for Station 41: Spatial DLM", echo = FALSE, fig.height=4.5,fig.width=10}
+
+residuals <- residuals(filtered_results)$res
+residuals <- residuals[,1] #for station 41
+residuals = as.numeric(residuals)
+
+
+par(mfrow=c(3, 2))
+  
+plot(residuals, type = "l", main = "Residuals")
+acf(residuals, main = "ACF of Residuals")
+pacf(residuals, main = "PACF of Residuals")
+hist(residuals, breaks = "Sturges", freq = FALSE, main = "Histogram of Residuals")
+lines(density(residuals), col = "blue") 
+
+qqnorm(residuals, main = "QQ Plot of Residuals")
+qqline(residuals, col = "red") 
+
+
+shapiro_test_result <- shapiro.test(residuals)
+
+print(shapiro_test_result)
+
+
+```
+
+
+
+In Figure 6, we run diagnostics for the forecast errors of station 41.The residuals do not display obvious patterns or trends, which generally suggests that the model does not suffer from non-random error structures. However, the variability of residuals appears slightly inconsistent, hinting at potential heteroscedasticity. As one way to improve the model we can incorporate lag values of the wind and temperature in an ARMA format. Based on the Shapiro normality test even though both univariate and multivariate dlm have normally distributed forecast residuals, multivariate one has a better score implying addition of spatial dependence has a small improvement.
+
+# Conclusion
+
+A well-constructed Hidden Markov Model (HMM) offers policymakers a valuable means to grasp the various states of air pollution. With assumptions about differing means and variances across states and since the states are discrete it offers more practical policy implications.  
+
+Dynamic Linear Model (DLM) operates under the assumptions of normality and linearity in distributions, and it requires the initial distribution to be independent of the errors. We have fitted two kind of DLMs one univariate and one multivariate including the spatial dependence between stations. What makes DLMs quite useful is the fact that it can be used online, as data comes continuously.Analysis of residuals suggests improvements can be still done to this model.
+
+
