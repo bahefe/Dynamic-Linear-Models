@@ -1,33 +1,34 @@
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LinearRegression
 
-# Sample data
-x = [1, 2, 3, 4, 5]
-y1 = [10, 20, 30, 40, 50]  # Data for primary y-axis
-y2 = [5, 15, 25, 35, 45]   # Data for secondary y-axis
+# Sample dataframe
+data = {
+    "date": pd.date_range(start="2024-01-01", periods=10),
+    "category_1": ["A"] * 5 + ["B"] * 5,
+    "category_2": ["X", "X", "Y", "Y", "Y", "X", "X", "Y", "Y", "Y"],
+    "metric": [1, 2, 3, 4, 5, 5, 4, 3, 2, 1],
+}
 
-# Create a subplot with secondary y-axis
-fig = make_subplots(specs=[[{"secondary_y": True}]])
+df = pd.DataFrame(data)
 
-# Add first trace (primary y-axis)
-fig.add_trace(
-    go.Scatter(x=x, y=y1, mode='lines+markers', name="Primary Y"),
-    secondary_y=False
+# Ensure date is numeric for regression
+df["date_ordinal"] = df["date"].map(lambda x: x.toordinal())
+
+# Function to calculate slope for each group
+def calculate_slope(group):
+    X = group["date_ordinal"].values.reshape(-1, 1)  # Independent variable
+    y = group["metric"].values  # Dependent variable
+    model = LinearRegression()
+    model.fit(X, y)
+    return model.coef_[0]  # Slope of the regression line
+
+# Group by categories and apply the function
+result = (
+    df.groupby(["category_1", "category_2"])
+    .apply(calculate_slope)
+    .reset_index(name="slope")
 )
 
-# Add second trace (secondary y-axis)
-fig.add_trace(
-    go.Scatter(x=x, y=y2, mode='lines+markers', name="Secondary Y"),
-    secondary_y=True
-)
-
-# Update layout
-fig.update_layout(
-    title="Scatter Plot with Two Y Axes",
-    xaxis_title="X Axis",
-    yaxis_title="Primary Y Axis",
-    yaxis2_title="Secondary Y Axis"
-)
-
-# Show the plot
-fig.show()
+# Display the result
+print(result)
